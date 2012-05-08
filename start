@@ -1,0 +1,6 @@
+#!/bin/bash
+if [ ! $# == 1 ]; then
+    echo "Usage: ./start creative|survival|pve"
+    exit
+fi
+screen -S $1 python wrapper/wrapper.py $1
