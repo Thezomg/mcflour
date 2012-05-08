@@ -146,7 +146,7 @@ class ServerInterface:
         
         self.tasks = []
         self.add_task(restart_interval, '~delayed-soft-restart')
-        self.add_task(save_interval, '~loop-save')
+        self.add_task(save_interval, '~save-loop')
         self.add_task(hang_check_interval, '~hang-loop')
         self.add_task(message_interval, '~message-loop')
 
@@ -312,10 +312,10 @@ class ServerInterface:
             self.run_command('say SAVING IN %d SECONDS' % save_warn_delay)
             self.add_task(save_warn_delay, '~save')
         
-        elif command == '~loop-save':
+        elif command == '~save-loop':
             self.remove_task('save')
             self.run_command('~delayed-save')
-            self.add_task(save_interval, '~loop-save')
+            self.add_task(save_interval, '~save-loop')
         
         #Restart
         elif command == '~restart':
