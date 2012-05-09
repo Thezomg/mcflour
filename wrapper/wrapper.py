@@ -39,7 +39,7 @@ output_exp = '^\d{2}:\d{2}:\d{2} \[%s\] %s'
 
 lwc_exp = 'Removing corrupted protection:.*Owner=([A-Za-z0-9_]{1,16}) Location=\[([^\s]+) ([0-9-]+),([0-9-]+),([0-9-]+)\] Created='
 
-save_interval = 600
+save_interval = 625
 restart_interval = 7200
 message_interval = 200
 
@@ -230,7 +230,7 @@ class ServerInterface:
                         if m:
                             self.debug('out of memory, restarting server...')
                             self.emergency_backup()
-                            self.run_command('~hard-restart')
+                            self.run_command('~restart')
                         
                         #Check for unknown command (means the server isn't hung)
                         m = re.match(output_exp % ('INFO', 'Unknown command'), l)
