@@ -16,14 +16,18 @@ from blessings import Terminal
 import ansiterm
 import prompt
 
+memory_default = 2800
+memory_overrides = {
+    'pve': 3800
+}
+
 ###
 ### Nerd...
 ###
 
-
 servers_dir = '/ssd'
 logs_dir = '/home/reddit/logs'
-server_command = 'java -jar -Xmx2800M -Xms2800M -server -Djline.terminal=jline.UnsupportedTerminal buk.jar nogui'
+server_command = 'java -jar -Xmx%dM -Xms%dM -server -Djline.terminal=jline.UnsupportedTerminal buk.jar nogui'
 output_exp = '^\d{2}:\d{2}:\d{2} \[%s\] %s'
 
 # -XX:+UseFastAccessorMethods -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC  -XX:MaxGCPauseMillis=50 -XX:UseSSE=3 -XX:+UseCompressedOops
@@ -61,8 +65,10 @@ class ServerInterface:
     hang_fails = 0
     tasks = []
     log = ''
+    
     def __init__(self, server_path):
         self.server_path = server_path
+        self.memory = memory_overrides.get(self.server_path, memory_default)
         self.server = None
         
         #Gives us the width
@@ -93,20 +99,33 @@ class ServerInterface:
         #Start
         self.start_server()
    
+    def get_path(self, name):
+        t = time.strftime("%Y-%m-%d-%H:%M:%S", time.gmtime())
+        path = os.path.join(logs_dir, self.server_path)
+        try:
+            os.mkdir(path)
+        except:
+            pass
+        
+        return os.path.join(path, "%s-%s.log" % (name, t))
+        
+   
     def backup(self):
         if os.path.exists('server.log'):
-            d = time.strftime("%Y-%m-%d-%H:%M:%S", time.gmtime())
-            new_path = os.path.join(logs_dir, self.server_path, 'server-'+d+'.log')
+            new_path = self.get_path('server')
             os.rename('server.log', new_path)
             zipper = subprocess.call(['gzip', '-9', new_path])
             self.debug('server.log backup done!')
     
     #Saves self.log to a file in case of a wrapper failure etc.
-    def emergency_backup(self):
-        d = time.strftime("%Y-%m-%d-%H:%M:%S", time.gmtime())
-        path = os.path.join(logs_dir, self.server_path, 'fail-'+d+'.log')
+    def emergency_backup(self, *args):
+        if args:
+            reason = '-' + args[0]
+        else:
+            reason = ''
+        path = self.get_path('fail' + reason)
         f = open(path, 'w')
-        f.write(ansiterm.strip_colors(self.log))
+        f.write(ansiterm.strip_colors(self.log + '\n'.join(self.console_output)))
         f.close()
         self.log = ''
         self.debug('emergency backup done!')
@@ -116,9 +135,10 @@ class ServerInterface:
 
     def start_server(self):
         self.exit_on_server_stop = False
+        self.oom = False
         
         #start the server...
-        self.server = subprocess.Popen(server_command.split(' '),
+        self.server = subprocess.Popen((server_command % (self.memory, self.memory)).split(' '),
            stdout=subprocess.PIPE,
            stderr=subprocess.PIPE,
            stdin =subprocess.PIPE,
@@ -215,7 +235,7 @@ class ServerInterface:
                             keyword = '!'+m.group(2)
                             for k, text in self.triggers:
                                 if k == keyword:
-                                    self.run_command('cmsg %s %s' % (user, text))
+                                    self.run_command('msg %s %s' % (user, text))
                             
                         #Check for server stop
                         m = re.match(output_exp % ('INFO', 'Stopping server'), l)
@@ -227,10 +247,11 @@ class ServerInterface:
                         
                         #Check for out-of-memory
                         m = re.match(output_exp % ('SEVERE', 'java.lang.OutOfMemoryError: GC overhead limit exceeded'), l)
-                        if m:
+                        if m and not self.oom:
                             self.debug('out of memory, restarting server...')
-                            self.emergency_backup()
+                            self.emergency_backup('outofmemory')
                             self.run_command('~restart')
+                            self.oom = True
                         
                         #Check for unknown command (means the server isn't hung)
                         m = re.match(output_exp % ('INFO', 'Unknown command'), l)
@@ -247,7 +268,7 @@ class ServerInterface:
                             a = m.groups()
                             a = (a[0],a[2],a[3],a[4],w[a[1]])
                             t = "%s Your lwc protection at %s, %s, %s in the %s was removed! Please re-lock if this is in error." % a
-                            self.run_command('cmsg '+t)
+                            self.run_command('msg '+t)
                             self.run_command('mail send '+t)
                             
                         
@@ -282,7 +303,7 @@ class ServerInterface:
                 for l in traceback.format_exc().strip().split('\n'):
                     self.debug(l)
                 self.debug('stopping...')  
-                self.emergency_backup() 
+                self.emergency_backup('pyexception') 
                 self.run_command('~stop')
 
         self.clear_prompt()
@@ -381,7 +402,7 @@ class ServerInterface:
             self.debug('server failed hang check %d of %d' % (self.hang_fails, hang_fail_limit))
             if self.hang_fails >= hang_fail_limit:
                 self.debug('killing hung server...')
-                self.emergency_backup()
+                self.emergency_backup('hang')
                 self.hang_fails = 0
                 self.run_command('~hard-restart')
         
@@ -405,7 +426,7 @@ class ServerInterface:
                     self.start_server()
             else:
                 self.debug('server stopped unexpectedly, exiting...')
-                self.emergency_backup()
+                self.emergency_backup('stop')
                 self.server = None
                 self.stopping = True
         
