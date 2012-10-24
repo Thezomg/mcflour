@@ -6,6 +6,7 @@ import time
 import select
 import re
 import gzip
+import tarfile
 
 import subprocess
 from threading import Thread
@@ -15,11 +16,9 @@ from blessings import Terminal
 
 import ansiterm
 import prompt
+from settings import get_settings
 
-memory_default = 2800
-memory_overrides = {
-    'pve': 3800
-}
+carto_interval = 2*24*60*60 #2 days
 
 ###
 ### Nerd...
@@ -27,10 +26,8 @@ memory_overrides = {
 
 servers_dir = '/ssd'
 logs_dir = '/home/reddit/logs'
-server_command = 'java -jar -Xmx%dM -Xms%dM -server -Djline.terminal=jline.UnsupportedTerminal buk.jar nogui'
-output_exp = '^\d{2}:\d{2}:\d{2} \[%s\] %s'
 
-# -XX:+UseFastAccessorMethods -XX:+UnlockExperimentalVMOptions -XX:+UseG1GC  -XX:MaxGCPauseMillis=50 -XX:UseSSE=3 -XX:+UseCompressedOops
+# -XX:+UseFastAccessorMethods -XX:+UnlockExperimentalVMOptions -Xincgc -XX:MaxGCPauseMillis=50 -XX:UseSSE=3 -XX:+UseCompressedOops
 
 ###
 ### Testing
@@ -38,14 +35,8 @@ output_exp = '^\d{2}:\d{2}:\d{2} \[%s\] %s'
 
 #servers_dir = '/home/barney/mcdev'
 #logs_dir = '/home/barney/mcdev/wrapper/logs'
-#server_command = 'java -Xmx1024M -Xms1024M -jar minecraft_server.jar nogui'
-#output_exp = '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[%s\] %s'
 
 lwc_exp = 'Removing corrupted protection:.*Owner=([A-Za-z0-9_]{1,16}) Location=\[([^\s]+) ([0-9-]+),([0-9-]+),([0-9-]+)\] Created='
-
-save_interval = 625
-restart_interval = 7200
-message_interval = 200
 
 hang_check_interval = 60
 hang_timeout = 10
@@ -65,10 +56,12 @@ class ServerInterface:
     hang_fails = 0
     tasks = []
     log = ''
+    carto_last = 0
+    scheduled_carto = False
     
     def __init__(self, server_path):
-        self.server_path = server_path
-        self.memory = memory_overrides.get(self.server_path, memory_default)
+        self.server_name = server_path
+        self.settings = get_settings(self.server_name)
         self.server = None
         
         #Gives us the width
@@ -84,7 +77,7 @@ class ServerInterface:
         self.console_output = []
         
         #Move to server directory
-        os.chdir(os.path.join(servers_dir, self.server_path))
+        os.chdir(os.path.join(servers_dir, self.server_name))
         
         #In case of any residual logs...
         self.backup()
@@ -101,7 +94,7 @@ class ServerInterface:
    
     def get_path(self, name):
         t = time.strftime("%Y-%m-%d-%H:%M:%S", time.gmtime())
-        path = os.path.join(logs_dir, self.server_path)
+        path = os.path.join(logs_dir, self.server_name)
         try:
             os.mkdir(path)
         except:
@@ -109,7 +102,19 @@ class ServerInterface:
         
         return os.path.join(path, "%s-%s.log" % (name, t))
         
-   
+    def do_carto(self):
+        fname = "world_%s.tar.gz" % self.server_name
+        
+        print "\nTarring up world..."
+        tar = tarfile.open(fname, "w:gz")
+        tar.add("world", arcname=("world_%s" % self.server_name))
+        tar.close()
+
+        print "Running carto script..."
+        subprocess.Popen(["/home/reddit/util/carto1.sh", self.server_name])
+        
+        print "Carto stuff finished!"
+        
     def backup(self):
         if os.path.exists('server.log'):
             new_path = self.get_path('server')
@@ -138,7 +143,7 @@ class ServerInterface:
         self.oom = False
         
         #start the server...
-        self.server = subprocess.Popen((server_command % (self.memory, self.memory)).split(' '),
+        self.server = subprocess.Popen((self.settings['command'] % (self.settings['memory'], self.settings['memory'])).split(' '),
            stdout=subprocess.PIPE,
            stderr=subprocess.PIPE,
            stdin =subprocess.PIPE,
@@ -165,10 +170,10 @@ class ServerInterface:
         t2.start()
         
         self.tasks = []
-        self.add_task(restart_interval, '~delayed-soft-restart')
-        self.add_task(save_interval, '~save-loop')
+        self.add_task(self.settings['restart_interval'], '~delayed-soft-restart')
+        self.add_task(self.settings['save_interval'], '~save-loop')
         self.add_task(hang_check_interval, '~hang-loop')
-        self.add_task(message_interval, '~message-loop')
+        self.add_task(self.settings['message_interval'], '~message-loop')
 
     def add_task(self, t, command):
         self.tasks.append((t+time.time(), command))
@@ -229,13 +234,15 @@ class ServerInterface:
                             continue
                         
                         #Triggers
+                        output_exp = self.settings['output_exp']
+                        
                         m = re.match(output_exp % ('INFO', '<([A-Za-z0-9_]{1,16})> \!(\w+)'), l)
                         if m:
                             user = m.group(1)
                             keyword = '!'+m.group(2)
                             for k, text in self.triggers:
                                 if k == keyword:
-                                    self.run_command('msg %s %s' % (user, text))
+                                    self.run_command(self.settings['trigger_command'] % (user, text))
                             
                         #Check for server stop
                         m = re.match(output_exp % ('INFO', 'Stopping server'), l)
@@ -278,20 +285,25 @@ class ServerInterface:
                         break
                 
                 #Write any server output
+                write = ''
                 if self.console_output:
-                    self.clear_prompt()
+                    write += self.clear_prompt()
                     for l in self.console_output:
-                        sys.stdout.write(l+'\n')
+                        write += l+'\n'
                         self.log += l+'\n'
-                    sys.stdout.write(str(self.prompt))
+                    write += str(self.prompt)
                     self.console_output = []
                 
                 #Write prompt
                 elif prompt_updated:
-                    self.clear_prompt()
-                    sys.stdout.write(str(self.prompt))
+                    write += self.clear_prompt()
+                    write += str(self.prompt)
                 
-                sys.stdout.flush()
+                try:
+                    sys.stdout.write(write)
+                    sys.stdout.flush()
+                except:
+                    pass
                 time.sleep(0.1)
 
             except KeyboardInterrupt:
@@ -306,7 +318,10 @@ class ServerInterface:
                 self.emergency_backup('pyexception') 
                 self.run_command('~stop')
 
-        self.clear_prompt()
+        try:
+            sys.stdout.write(self.clear_prompt())
+        except:
+            pass
         ansiterm.raw_mode(False)
 
     def run_command_from_prompt(self, command):
@@ -336,7 +351,7 @@ class ServerInterface:
         elif command == '~save-loop':
             self.remove_task('save')
             self.run_command('~delayed-save')
-            self.add_task(save_interval, '~save-loop')
+            self.add_task(self.settings['save_interval'], '~save-loop')
         
         #Restart
         elif command == '~restart':
@@ -390,6 +405,10 @@ class ServerInterface:
         elif command == '~emergency-backup':
             self.emergency_backup()
         
+        elif command == '~schedule-carto':
+            self.debug('carto scheduled for next restart!')
+            self.scheduled_carto = True
+        
         #Check if the server is hung...
         elif command == '~hang-loop':
             self.run_command('') #Send an empty command, to generate 'unknown command'
@@ -409,7 +428,11 @@ class ServerInterface:
         #Prints a random message from messages.txt
         elif command == '~message-loop':
             self.run_command('say '+self.messages[random.randint(0,len(self.messages)-1)])
-            self.add_task(message_interval, '~message-loop')
+            self.add_task(self.settings['message_interval'], '~message-loop')
+
+	elif command == '~message-load':
+            #reload messages
+            self.messages = open("messages.txt").read().splitlines()
         
         else:
             self.debug('unknown command')
@@ -418,6 +441,12 @@ class ServerInterface:
     def server_stopped(self):
         if self.server:
             self.backup()
+            if self.settings['carto']:
+                if self.scheduled_carto or (time.time() % self.settings['carto_interval']) < self.carto_last:
+                    self.do_carto()
+                    self.scheduled_carto = False
+                self.carto_last = time.time() % self.settings['carto_interval']
+                
             if self.expecting_stop:
                 if self.exit_on_server_stop:
                     self.server = None
@@ -432,7 +461,7 @@ class ServerInterface:
         
     
     def clear_prompt(self):
-        sys.stdout.write('\r' + ' '*self.term.width + '\r')
+        return '\r' + ' '*self.term.width + '\r'
         
 
 if __name__ == '__main__':
